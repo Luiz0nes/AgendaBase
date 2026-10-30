@@ -1,0 +1,194 @@
+version: '3.8'
+
+services:
+  # Supabase Local Development
+  supabase-db:
+    image: supabase/postgres:15.1.0.117
+    container_name: agenda-pro-db
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "54322:5432"
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+      - ./packages/backend/supabase/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  supabase-auth:
+    image: supabase/gotrue:v2.151.0
+    container_name: agenda-pro-auth
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://postgres:postgres@supabase-db:5432/postgres
+      GOTRUE_SITE_URL: http://localhost:3000
+      GOTRUE_URI_ALLOW_LIST: http://localhost:3000
+      GOTRUE_JWT_SECRET: your-super-secret-jwt-key-min-32-chars-long
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_DISABLE_SIGNUP: "false"
+    ports:
+      - "54321:9999"
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+
+  supabase-rest:
+    image: supabase/postgrest:v11.0.1
+    container_name: agenda-pro-rest
+    environment:
+      PGRST_DB_URI: postgres://postgres:postgres@supabase-db:5432/postgres
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: your-super-secret-jwt-key-min-32-chars-long
+    ports:
+      - "54323:3000"
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+
+  supabase-realtime:
+    image: supabase/realtime:v2.26.11
+    container_name: agenda-pro-realtime
+    environment:
+      DB_HOST: supabase-db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      PORT: 4000
+      SECRET_KEY_BASE: your-secret-key-base
+      ERL_AFLAGS: "-proto_dist inet_tcp"
+    ports:
+      - "54324:4000"
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+
+  supabase-storage:
+    image: supabase/storage-api:v1.10.0
+    container_name: agenda-pro-storage
+    environment:
+      ANON_KEY: your-anon-key-here
+      SERVICE_KEY: your-service-role-key-here
+      POSTGREST_URL: http://supabase-rest:3000
+      PGRST_JWT_SECRET: your-super-secret-jwt-key-min-32-chars-long
+      DATABASE_URL: postgres://postgres:postgres@supabase-db:5432/postgres
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_FACTOR: "true"
+    ports:
+      - "54325:5000"
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    depends_on:
+      supabase-rest:
+        condition: service_started
+
+  supabase-studio:
+    image: supabase/studio:20231211-2c0c7a6
+    container_name: agenda-pro-studio
+    environment:
+      SUPABASE_URL: http://localhost:54321
+      STUDIO_PG_META_URL: http://supabase-rest:3000
+      STUDIO_DEFAULT_ORGANIZATION: agenda-pro
+      STUDIO_DEFAULT_PROJECT: local
+    ports:
+      - "54326:3000"
+    depends_on:
+      supabase-rest:
+        condition: service_started
+
+  # Evolution API (WhatsApp)
+  evolution-api:
+    image: atendai/evolution-api:v1.5.0
+    container_name: agenda-pro-evolution
+    environment:
+      SERVER_URL: http://localhost:8080
+      AUTHENTICATION_API_KEY: your-evolution-api-key
+      DATABASE_CONNECTION_URI: postgres://postgres:postgres@supabase-db:5432/postgres?schema=evolution
+      DATABASE_CONNECTION_CLIENT_NAME: evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      RABBITMQ_ENABLED: "false"
+      REDIS_ENABLED: "false"
+      LOG_LEVEL: debug
+      DELIVERY_REPORT_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    volumes:
+      - evolution-data:/evolution/instances
+
+  # Backend
+  backend:
+    build:
+      context: ./packages/backend
+      dockerfile: Dockerfile.dev
+    container_name: agenda-pro-backend
+    environment:
+      NODE_ENV: development
+      PORT: 3333
+      HOST: 0.0.0.0
+      SUPABASE_URL: http://supabase-auth:9999
+      SUPABASE_ANON_KEY: your-anon-key-here
+      SUPABASE_SERVICE_ROLE_KEY: your-service-role-key-here
+      JWT_SECRET: your-super-secret-jwt-key-min-32-chars-long
+      JWT_EXPIRES_IN: 7d
+      EVOLUTION_API_URL: http://evolution-api:8080
+      EVOLUTION_API_KEY: your-evolution-api-key
+      EVOLUTION_INSTANCE_NAME: agenda-pro
+      FRONTEND_URL: http://localhost:3000
+    ports:
+      - "3333:3333"
+    volumes:
+      - ./packages/backend:/app
+      - /app/node_modules
+    depends_on:
+      supabase-auth:
+        condition: service_started
+      evolution-api:
+        condition: service_started
+    command: npm run dev
+
+  # Frontend
+  frontend:
+    build:
+      context: ./packages/frontend
+      dockerfile: Dockerfile.dev
+    container_name: agenda-pro-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3333
+      NEXT_PUBLIC_SUPABASE_URL: http://localhost:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: your-anon-key-here
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: your-nextauth-secret-key
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./packages/frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  supabase-db-data:
+  supabase-storage-data:
+  evolution-data:
